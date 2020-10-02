@@ -30,6 +30,9 @@
 //--------------------------------------------------------------------------------
 #include "teapot.inl"
 
+constexpr int width = 1000;
+constexpr int height = 1000;
+
 //--------------------------------------------------------------------------------
 // Ctor
 //--------------------------------------------------------------------------------
@@ -195,6 +198,27 @@ void MoreTeapotsRenderer::Init(const int32_t numX, const int32_t numY,
     LoadShaders(&shader_param_, "Shaders/VS_ShaderPlain.vsh",
                 "Shaders/ShaderPlain.fsh");
   }
+
+  glGenFramebuffers(1, &mFramebuffer);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
+
+  glGenTextures(1, &mColorTexture);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, mColorTexture);
+  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, width, height, 2);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 0);
+
+  glGenTextures(1, &mDepthTexture);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, mDepthTexture);
+  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT16, width, height, 2);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 
 void MoreTeapotsRenderer::UpdateViewport() {
@@ -261,6 +285,42 @@ void MoreTeapotsRenderer::Update(float fTime) {
 // Render
 //--------------------------------------------------------------------------------
 void MoreTeapotsRenderer::Render() {
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
+  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 0);
+  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, mDepthTexture, 0, 0);
+  if (GL_FRAMEBUFFER_COMPLETE != glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)) {
+    std::terminate();
+  }
+  glClearColor(1, 0, 0, 0);
+  glClearDepthf(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+  RenderReal();
+
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, mFramebuffer);
+  glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+  //second pass
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
+  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 1);
+  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, mDepthTexture, 0, 1);
+  if (GL_FRAMEBUFFER_COMPLETE != glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)) {
+    std::terminate();
+  }
+  glClearColor(1, 0, 0, 0);
+  glClearDepthf(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+  RenderReal();
+
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, mFramebuffer);
+  glBlitFramebuffer(0, 0, width, height, 0, height+height, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+}
+
+void MoreTeapotsRenderer::RenderReal() {
+  glEnable(GL_DEPTH_TEST);
   // Bind the VBO
   glBindBuffer(GL_ARRAY_BUFFER, vbo_);
 
@@ -301,9 +361,9 @@ void MoreTeapotsRenderer::Render() {
     // Update UBO
     glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
     float* p = (float*)glMapBufferRange(
-        GL_UNIFORM_BUFFER, 0, teapot_x_ * teapot_y_ * teapot_z_ *
+            GL_UNIFORM_BUFFER, 0, teapot_x_ * teapot_y_ * teapot_z_ *
                                   (ubo_matrix_stride_ * 2) * sizeof(float),
-        GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+            GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
     float* mat_mvp = p;
     float* mat_mv = p + teapot_x_ * teapot_y_ * teapot_z_ * ubo_matrix_stride_;
     for (int32_t i = 0; i < teapot_x_ * teapot_y_ * teapot_z_; ++i) {
@@ -312,7 +372,7 @@ void MoreTeapotsRenderer::Render() {
       vec_current_rotations_[i] += vec_rotations_[i];
       vec_current_rotations_[i].Value(x, y);
       ndk_helper::Mat4 mat_rotation =
-          ndk_helper::Mat4::RotationX(x) * ndk_helper::Mat4::RotationY(y);
+              ndk_helper::Mat4::RotationX(x) * ndk_helper::Mat4::RotationY(y);
 
       // Feed Projection and Model View matrices to the shaders
       ndk_helper::Mat4 mat_v = mat_view_ * vec_mat_models_[i] * mat_rotation;
@@ -343,7 +403,7 @@ void MoreTeapotsRenderer::Render() {
       vec_current_rotations_[i] += vec_rotations_[i];
       vec_current_rotations_[i].Value(x, y);
       ndk_helper::Mat4 mat_rotation =
-          ndk_helper::Mat4::RotationX(x) * ndk_helper::Mat4::RotationY(y);
+              ndk_helper::Mat4::RotationX(x) * ndk_helper::Mat4::RotationY(y);
 
       // Feed Projection and Model View matrices to the shaders
       ndk_helper::Mat4 mat_v = mat_view_ * vec_mat_models_[i] * mat_rotation;

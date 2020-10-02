@@ -102,6 +102,9 @@ class MoreTeapotsRenderer {
   int32_t ubo_vector_stride_;
   bool geometry_instancing_support_;
   bool arb_support_;
+  GLuint mFramebuffer;
+  GLuint mColorTexture;
+  GLuint mDepthTexture;
 
   std::string ToString(const int32_t i);
 
@@ -110,6 +113,7 @@ class MoreTeapotsRenderer {
   virtual ~MoreTeapotsRenderer();
   void Init(const int32_t numX, const int32_t numY, const int32_t numZ);
   void Render();
+  void RenderReal();
   void Update(float dTime);
   bool Bind(ndk_helper::TapCamera* camera);
   void Unload();
