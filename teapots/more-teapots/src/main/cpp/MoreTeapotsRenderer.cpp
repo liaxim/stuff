@@ -24,6 +24,9 @@
 #include "MoreTeapotsRenderer.h"
 
 #include <string.h>
+#include <android/hardware_buffer.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2ext.h>
 
 //--------------------------------------------------------------------------------
 // Teapot model data
@@ -199,25 +202,55 @@ void MoreTeapotsRenderer::Init(const int32_t numX, const int32_t numY,
                 "Shaders/ShaderPlain.fsh");
   }
 
+    AHardwareBuffer* hwbColor{};
+    AHardwareBuffer* hwbDepth{};
+
+    AHardwareBuffer_Desc descColor{width, height, 2,
+                                   AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+                              AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
+                              AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
+                                   0, 0, 0};
+    auto err = AHardwareBuffer_allocate(&descColor, &hwbColor);
+    assert(err == 0);
+
+    AHardwareBuffer_Desc descDepth{width, height, 2,
+                                   AHARDWAREBUFFER_FORMAT_D16_UNORM,
+                              AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
+                              AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
+                              0, 0, 0};
+    err = AHardwareBuffer_allocate(&descDepth, &hwbDepth);
+    assert(err == 0);
+
+    EGLint attrib_list[] = {EGL_NONE};
+    auto display = eglGetCurrentDisplay();
+    EGLImage imgColor = eglCreateImageKHR(
+            display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+            eglGetNativeClientBufferANDROID(hwbColor), attrib_list);
+    EGLImage imgDepth = eglCreateImageKHR(
+            display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+            eglGetNativeClientBufferANDROID(hwbDepth), attrib_list);
+
   glGenFramebuffers(1, &mFramebuffer);
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
 
   glGenTextures(1, &mColorTexture);
   glBindTexture(GL_TEXTURE_2D_ARRAY, mColorTexture);
-  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, width, height, 2);
+  auto img = reinterpret_cast<GLeglImageOES *>(imgColor);
+  glEGLImageTargetTexStorageEXT(GL_TEXTURE_2D_ARRAY, img, nullptr);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 0);
 
   glGenTextures(1, &mDepthTexture);
   glBindTexture(GL_TEXTURE_2D_ARRAY, mDepthTexture);
-  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT16, width, height, 2);
+  img = reinterpret_cast<GLeglImageOES *>(imgDepth);
+  glEGLImageTargetTexStorageEXT(GL_TEXTURE_2D_ARRAY, img, nullptr);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 

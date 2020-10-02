@@ -16,6 +16,8 @@
 
 cmake_minimum_required(VERSION 3.4.1)
 project(MoreTeapotsNativeActivity LANGUAGES C CXX)
+add_compile_options(-DGL_GLEXT_PROTOTYPES)
+add_compile_options(-DEGL_EGLEXT_PROTOTYPES)
 
 # set up common compile options
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wall -Werror -fno-exceptions -fno-rtti")
@@ -49,4 +51,5 @@ set_target_properties(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME}
   PRIVATE
     NdkHelper
+    android GLESv3
 )
