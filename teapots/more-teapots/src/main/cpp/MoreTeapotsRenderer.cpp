@@ -27,6 +27,7 @@
 #include <android/hardware_buffer.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2ext.h>
+#include <vulkan/vulkan.h>
 
 //--------------------------------------------------------------------------------
 // Teapot model data
@@ -46,6 +47,48 @@ MoreTeapotsRenderer::MoreTeapotsRenderer()
 // Dtor
 //--------------------------------------------------------------------------------
 MoreTeapotsRenderer::~MoreTeapotsRenderer() { Unload(); }
+
+bool getMemoryTypeIndex(const VkPhysicalDeviceMemoryProperties &memoryProperties,
+                                               const VkMemoryRequirements &memoryRequirements, uint32_t &memoryTypeIndex) {
+    bool foundMemoryType = false;
+
+    VkMemoryPropertyFlags requiredProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const uint32_t memoryCount = memoryProperties.memoryTypeCount;
+    for (uint32_t memoryIndex = 0; memoryIndex < memoryCount; ++memoryIndex) {
+        const uint32_t memoryTypeBits = (1 << memoryIndex);
+        const bool isRequiredMemoryType = memoryRequirements.memoryTypeBits & memoryTypeBits;
+
+        const VkMemoryPropertyFlags properties =
+                memoryProperties.memoryTypes[memoryIndex].propertyFlags;
+        const bool hasRequiredProperties =
+                (properties & requiredProperties) == requiredProperties;
+
+        if (isRequiredMemoryType && hasRequiredProperties) {
+            foundMemoryType = true;
+            memoryTypeIndex = memoryIndex;
+        }
+    }
+
+    return foundMemoryType;
+}
+
+int getMemoryFileDescriptor(VkInstance instance, VkDevice device, VkDeviceMemory deviceMemory) {
+  int fileDescriptor;
+
+  auto mVkGetMemoryFdKHR = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetInstanceProcAddr(
+          instance, "vkGetMemoryFdKHR"));
+
+  const VkMemoryGetFdInfoKHR memoryGetFdInfo{
+          .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+          .memory = deviceMemory,
+          .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+  VkResult result = mVkGetMemoryFdKHR(device, &memoryGetFdInfo, &fileDescriptor);
+  assert(result == VK_SUCCESS);
+
+  return fileDescriptor;
+}
+
+
 
 //--------------------------------------------------------------------------------
 // Init
@@ -202,56 +245,164 @@ void MoreTeapotsRenderer::Init(const int32_t numX, const int32_t numY,
                 "Shaders/ShaderPlain.fsh");
   }
 
-    AHardwareBuffer* hwbColor{};
-    AHardwareBuffer* hwbDepth{};
+  ///create
+    VkInstanceCreateInfo instInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    VkInstance vulkanInstance;
+    auto result = vkCreateInstance(&instInfo, nullptr, &vulkanInstance);
+    uint32_t count;
+    result = vkEnumeratePhysicalDevices(vulkanInstance, &count, nullptr);
+    VkPhysicalDevice physicalDevices[count];
+    result = vkEnumeratePhysicalDevices(vulkanInstance, &count, physicalDevices);
 
-    AHardwareBuffer_Desc descColor{width, height, 2,
-                                   AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
-                              AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
-                              AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-                                   0, 0, 0};
-    auto err = AHardwareBuffer_allocate(&descColor, &hwbColor);
-    assert(err == 0);
+    auto physicalDevice = physicalDevices[0];
+    VkPhysicalDeviceMemoryProperties memoryProperties{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
 
-    AHardwareBuffer_Desc descDepth{width, height, 2,
-                                   AHARDWAREBUFFER_FORMAT_D16_UNORM,
-                              AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
-                              AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-                              0, 0, 0};
-    err = AHardwareBuffer_allocate(&descDepth, &hwbDepth);
-    assert(err == 0);
+    //queuefamilyindex
+    uint32_t queueFamilyIndex;
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilyProps(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilyProps.data());
+    bool foundQueueFamilyIndex = false;
+    for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+        if ((queueFamilyProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0u) {
+            queueFamilyIndex = i;
+            foundQueueFamilyIndex = true;
+            break;
+        }
+    }
 
-    EGLint attrib_list[] = {EGL_NONE};
-    auto display = eglGetCurrentDisplay();
-    EGLImage imgColor = eglCreateImageKHR(
-            display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-            eglGetNativeClientBufferANDROID(hwbColor), attrib_list);
-    EGLImage imgDepth = eglCreateImageKHR(
-            display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-            eglGetNativeClientBufferANDROID(hwbDepth), attrib_list);
+    //createdevice
+    float queuePriorities = 0;
+    VkDeviceQueueCreateInfo queueInfo{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = queueFamilyIndex,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriorities
+    };
+    VkDeviceCreateInfo deviceInfo{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            .queueCreateInfoCount = 1,
+            .pQueueCreateInfos = &queueInfo,
+            .enabledExtensionCount = 0,
+            .ppEnabledExtensionNames = nullptr
+    };
+    VkDevice device;
+    result = vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device);
+    assert(result == VK_SUCCESS);
+
+    //createImage
+    const VkExternalMemoryImageCreateInfo externalMemoryImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+    };
+
+    //!TODO: Map remaining XR flags.
+    const VkImageCreateInfo imageInfo {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = &externalMemoryImageCreateInfo,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .extent.width = 1024,
+            .extent.height = 1024,
+            .extent.depth = 1,
+            .mipLevels = 1,
+            .arrayLayers = 2,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            //.tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+            //.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            //.queueFamilyIndexCount = 0,
+            //.pQueueFamilyIndices = nullptr,
+            //.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+    };
+
+    VkImage vkimage;
+    result = vkCreateImage(device, &imageInfo, nullptr, &vkimage);
+    assert(result == VK_SUCCESS);
+
+    //allocatememory
+    VkMemoryRequirements memoryRequirements{};
+    vkGetImageMemoryRequirements(device, vkimage, &memoryRequirements);
+
+    uint32_t memoryTypeIndex;
+    bool foundMemoryType = getMemoryTypeIndex(memoryProperties, memoryRequirements,
+                                              memoryTypeIndex);
+    assert(foundMemoryType);
+
+    VkExportMemoryAllocateInfo exportMemoryAllocateInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    exportMemoryAllocateInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+    VkMemoryDedicatedAllocateInfo dedicatedAllocInfo{
+            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    dedicatedAllocInfo.pNext = &exportMemoryAllocateInfo;
+    dedicatedAllocInfo.image = vkimage;
+    dedicatedAllocInfo.buffer = VK_NULL_HANDLE;
+
+    const VkMemoryAllocateInfo memoryAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = &dedicatedAllocInfo,
+            .allocationSize = memoryRequirements.size,
+            .memoryTypeIndex = memoryTypeIndex
+    };
+
+    VkDeviceMemory deviceMemory;
+    result = vkAllocateMemory(device, &memoryAllocateInfo, NULL, &deviceMemory);
+    assert(result == VK_SUCCESS);
+    auto memorySize = memoryRequirements.size;
+    result = vkBindImageMemory(device, vkimage, deviceMemory, 0);
+    assert(result == VK_SUCCESS);
+    auto fileDescriptor = getMemoryFileDescriptor(vulkanInstance, device, deviceMemory);
+
+    GLuint memoryObject;
+    static const auto pGlCreateMemoryObjectsEXT = reinterpret_cast<PFNGLCREATEMEMORYOBJECTSEXTPROC>(eglGetProcAddress(
+             "glCreateMemoryObjectsEXT"));
+    pGlCreateMemoryObjectsEXT(1, &memoryObject);
+    auto glerror = glGetError();
+
+    GLint dedicatedMemory = GL_TRUE;
+    static const auto pGlMemoryObjectParameterivEXT = reinterpret_cast<PFNGLMEMORYOBJECTPARAMETERIVEXTPROC>(eglGetProcAddress(
+              "glMemoryObjectParameterivEXT"));
+    pGlMemoryObjectParameterivEXT(memoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT,
+                                    &dedicatedMemory);
+    glerror = glGetError();
+
+    static const auto pGlImportMemoryFdEXT = reinterpret_cast<PFNGLIMPORTMEMORYFDEXTPROC>(eglGetProcAddress(
+              "glImportMemoryFdEXT"));
+      // A successful import operation transfers ownership of fileDescriptor to the GL implementation
+    pGlImportMemoryFdEXT(memoryObject, memorySize, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fileDescriptor);
+    glerror = glGetError();
+
+
+    glGenTextures(1, &mColorTexture);
+    GLenum textureTarget = GL_TEXTURE_2D_ARRAY;
+    glBindTexture(textureTarget, mColorTexture);
+
+    static const auto pGlTexStorageMem3DEXT =
+            reinterpret_cast<PFNGLTEXSTORAGEMEM3DEXTPROC>(eglGetProcAddress("glTexStorageMem3DEXT"));
+    pGlTexStorageMem3DEXT(
+            GL_TEXTURE_2D_ARRAY,
+            1,
+            GL_RGBA8,
+            1024,
+            1024,
+            2,
+            memoryObject,
+            0);
+    glerror = glGetError();
+
+    glTexParameteri(textureTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(textureTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(textureTarget, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(textureTarget, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(textureTarget, 0);
 
   glGenFramebuffers(1, &mFramebuffer);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
 
-  glGenTextures(1, &mColorTexture);
-  glBindTexture(GL_TEXTURE_2D_ARRAY, mColorTexture);
-  auto img = reinterpret_cast<GLeglImageOES *>(imgColor);
-  glEGLImageTargetTexStorageEXT(GL_TEXTURE_2D_ARRAY, img, nullptr);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-  glGenTextures(1, &mDepthTexture);
-  glBindTexture(GL_TEXTURE_2D_ARRAY, mDepthTexture);
-  img = reinterpret_cast<GLeglImageOES *>(imgDepth);
-  glEGLImageTargetTexStorageEXT(GL_TEXTURE_2D_ARRAY, img, nullptr);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  vkDestroyImage(device, vkimage, nullptr);
+  vkDestroyDevice(device, nullptr);
+  vkDestroyInstance(vulkanInstance, nullptr);
 }
 
 void MoreTeapotsRenderer::UpdateViewport() {
@@ -320,16 +471,13 @@ void MoreTeapotsRenderer::Update(float fTime) {
 void MoreTeapotsRenderer::Render() {
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
   glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 0);
-  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, mDepthTexture, 0, 0);
   if (GL_FRAMEBUFFER_COMPLETE != glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)) {
     std::terminate();
   }
   glClearColor(1, 0, 0, 0);
-  glClearDepthf(1.0f);
-  glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+  glClear(GL_COLOR_BUFFER_BIT);
 
   RenderReal();
-
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
   glBindFramebuffer(GL_READ_FRAMEBUFFER, mFramebuffer);
   glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -337,19 +485,18 @@ void MoreTeapotsRenderer::Render() {
   //second pass
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFramebuffer);
   glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, mColorTexture, 0, 1);
-  glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, mDepthTexture, 0, 1);
   if (GL_FRAMEBUFFER_COMPLETE != glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)) {
     std::terminate();
   }
-  glClearColor(1, 0, 0, 0);
-  glClearDepthf(1.0f);
-  glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+  glClearColor(0, 1, 0, 0);
+  glClear(GL_COLOR_BUFFER_BIT);
 
   RenderReal();
 
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
   glBindFramebuffer(GL_READ_FRAMEBUFFER, mFramebuffer);
   glBlitFramebuffer(0, 0, width, height, 0, height+height, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
 }
 
 void MoreTeapotsRenderer::RenderReal() {
